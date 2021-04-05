@@ -13,19 +13,25 @@ library(DataExplorer)
 library(tidymodels)
 # Data Viz / Stats
 library(ggstatsplot)
+library(collapsibleTree)
 
 # DADOS ----
 
 # Ibema
 
-ibema <- read_delim("00_data/Dados _BlueShift.csv", ";",
-                  escape_double = FALSE, col_types = cols(
-                      VLR_PRECO_LIQUIDO = col_number(),           
-                      VLR_FATURAMENTO_BRUTO = col_number(), 
-                      VLR_FATURAMENTO_SEM_IPI = col_number(), 
-                      VLR_FATURAMENTO_SEM_IMPOSTO = col_number(), 
-                      VLR_TAXA_NOTA = col_number(),
-                      QTD_VOLUME = col_number()), trim_ws = TRUE)
+ibema <- read_delim(
+  "00_data/Dados_BlueShift_Total.csv", ";",
+  escape_double = FALSE,
+  col_types = cols(
+    VLR_PRECO_LIQUIDO           = col_number(),
+    VLR_FATURAMENTO_BRUTO       = col_number(),
+    VLR_FATURAMENTO_SEM_IPI     = col_number(),
+    VLR_FATURAMENTO_SEM_IMPOSTO = col_number(),
+    VLR_TAXA_NOTA               = col_number(),
+    QTD_VOLUME                  = col_number()
+  ),
+  trim_ws = TRUE
+)
 
 #ibema <- readRDS("00_data/dataset_ibema.rds")
 
@@ -53,7 +59,7 @@ create_report(ibema,
 
 # DATA PREP ----
 
-ibema_prep <- ibema %>%
+ibema_prep <- ibema %>% 
   mutate(
     cod_gramatura      = as.factor(cod_gramatura),
     cod_site           = as.factor(cod_site),
@@ -61,21 +67,19 @@ ibema_prep <- ibema %>%
     cod_tipo_embalagem = as.factor(cod_tipo_embalagem),
     cod_configuracao   = as.factor(cod_configuracao),
     cod_produto        = as.factor(cod_produto),
-    dat_movimento      = as.Date(dat_movimento,
-                                 format = "%d/%m/%Y"),
+    dat_movimento      = as.Date(dat_movimento),
     cod_produto        = fct_lump_prop(cod_produto, prop = 0.01),
     cod_configuracao   = fct_lump_prop(cod_configuracao, prop = 0.01),
     cod_uf             = fct_lump_prop(cod_uf, prop = 0.01),
     cod_gramatura      = fct_lump_prop(cod_gramatura, prop = 0.01)) %>% 
   filter(
     num_comprimento > 0, num_largura > 0,  qtd_volume > 0, 
-      vlr_faturamento_bruto > 0, vlr_preco_liquido > 0) %>% 
+    vlr_faturamento_bruto > 0, vlr_preco_liquido > 0) %>% 
   select(
       -vlr_despesa_financeira, -vlr_faturamento_bruto,
       -vlr_comissao, -vlr_despesa_venda, -vlr_frete_unitario,
       -nom_cidade, -vlr_faturamento_sem_imposto, -vlr_impostos,
-      -vlr_taxa_nota, -vlr_faturamento_sem_ipi, -vlr_frete) %>% 
-  drop_na()
+      -vlr_taxa_nota, -vlr_faturamento_sem_ipi, -vlr_frete)
 
 glimpse(ibema_prep)
 
@@ -85,32 +89,101 @@ create_report(ibema_prep,
 saveRDS(ibema, "00_data/ibema.rds")
 saveRDS(ibema_prep, "00_data/ibema_prep.rds")
 
+ibema_prep %>% 
+  collapsibleTree(
+    hierarchy = c("cod_site", "cod_produto", "cod_uf", "cod_tipo_embalagem", 
+                  "cod_gramatura" ,"cod_configuracao"),
+    attribute = "qtd_volume",
+    root      = "All Sites",
+    aggFun    = sum,
+    nodeSize  = "qtd_volume",
+    tooltip   = TRUE,
+    fontSize  = 16
+  )
 
 ibema_sp <- filter(ibema_prep, cod_uf == 'SP')
 create_report(ibema_sp, 
               output_file = 'ibema_sp.html', config = report_config)
 
-ibema_sp_bobina <- filter(ibema_sp, cod_tipo_embalagem == 'BOBINA')
-create_report(ibema_sp_bobina, 
-              output_file = 'ibema_sp_bobina.html', config = report_config)
+# ibema_sp_bobina <- filter(ibema_sp, cod_tipo_embalagem == 'BOBINA')
+# create_report(ibema_sp_bobina, 
+#               output_file = 'ibema_sp_bobina.html', config = report_config)
 
-# CORRELOGRAMS ----
+# CORRELOGRAMAS ----
 
 ggcorrmat(
-  data = select(ibema_prep, where(is.numeric)),
+  data = select(ibema_sp, where(is.numeric)),
   p.adjust.method = "none",
+  # type = "spearman",
   output = "plot"
 ) -> p
 p
 
 ggcorrmat(
-  data = select(ibema_prep, where(is.numeric)),
+  data = select(ibema_sp, where(is.numeric)),
   p.adjust.method = "none",
   output = "dataframe"
 ) -> cm
 cm
 
-ibema_final <- ibema_prep
+# ANÁLISE EXPLORATÓRIA ----
+
+ibema_sp %>% glimpse()
+
+ibema_sp %>% 
+  plot_time_series(dat_movimento, qtd_volume)
+
+ibema_sp %>% 
+  plot_seasonal_diagnostics(.date_var = dat_movimento, 
+                            .feature_set = c("wday.lbl", "month.lbl",
+                                             "quarter", "year"), 
+                            log1p(qtd_volume))
+
+ibema_sp %>% 
+  plot_seasonal_diagnostics(.date_var = dat_movimento, 
+                            .feature_set = c("wday.lbl", "month.lbl",
+                                             "quarter", "year"), 
+                            log1p(vlr_preco_liquido))
+
+ibema_sp %>% 
+  plot_seasonal_diagnostics(.date_var = dat_movimento, 
+                            .feature_set = c("month.lbl"), 
+                            log1p(vlr_preco_liquido))
+
+ibema_sp_week <- ibema_sp %>% 
+  summarise_by_time(
+    .date_var = dat_movimento, 
+    .by = "week",
+    vlr_preco_liquido = mean(vlr_preco_liquido),
+    qtd_volume = sum(qtd_volume)
+  )
+
+ibema_sp_week <- ibema_sp_week %>% 
+  mutate(elast = (c(0, diff(qtd_volume)) / qtd_volume) / 
+           (c(0, diff(vlr_preco_liquido)) / vlr_preco_liquido))
+
+ibema_sp_week$elast <- ifelse(
+  is.na(ibema_sp_week$elast), 0, ibema_sp_week$elast
+)
+
+ibema_sp_week %>% glimpse()
+
+ibema_sp_week %>% 
+  plot_time_series(dat_movimento, qtd_volume)
+
+ibema_sp_week %>% 
+  plot_time_series(dat_movimento, log1p(qtd_volume))
+
+ibema_sp_week %>% 
+  plot_time_series(dat_movimento, vlr_preco_liquido)
+
+ibema_sp_week %>% 
+  plot_time_series(dat_movimento, log1p(vlr_preco_liquido))
+
+ibema_sp_week$elast %>% summary()
+
+ibema_sp_week %>% 
+  plot_time_series(dat_movimento, elast)
 
 # MACHINE LEARNING ----
 
