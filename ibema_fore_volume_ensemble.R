@@ -23,7 +23,7 @@ library(modeltime)
 library(modeltime.ensemble)
 library(modeltime.resample)
 # Data Viz / Stats
-library(ggstatsplot)
+library(plotly)
 # library(collapsibleTree)
 
 # INGESTÃO DE DADOS & PIPELINE DE DATA PREP ----
@@ -72,7 +72,7 @@ ibema <- read_delim(
   filter(cod_uf == UF, cod_site == SITE, cod_tipo_embalagem == EMBALAGEM) %>% 
   select(-cod_uf, -cod_site, -cod_tipo_embalagem) %>% 
   arrange(dat_movimento) %>% 
-  pad_by_time(.date_var = dat_movimento, .by = "day", .pad_value = NA) %>% 
+  pad_by_time(.date_var = dat_movimento, .by = "day", .pad_value = 0) %>% 
   summarise_by_time(.date_var = dat_movimento, .by = "day", 
                     preco_liq_medio = mean(vlr_preco_liquido), 
                     volume_total = sum(qtd_volume)) %>% 
@@ -153,26 +153,30 @@ refit_and_plot <- function(...) {
 ibema_transformed_tbl <- ibema %>%
   
   # Preprocessamento do Alvo
-  mutate(preco_avg_trans = log(preco_liq_medio)) %>%
-  mutate(preco_avg_trans = standardize_vec(preco_avg_trans)) %>%
+  mutate(vol_tot_trans = log_interval_vec(volume_total, limit_lower = 0,
+                                          offset = 1)) %>%
+  mutate(vol_tot_trans = standardize_vec(vol_tot_trans)) %>%
   select(-volume_total, -preco_liq_medio)
 
 # Parâmetros chave
-std_mean    <- 8.26575793917595
-std_sd      <- 0.125079020650008
+limit_lower <- 0
+limit_upper <- 216.3745
+offset      <- 1
+std_mean    <- -3.17308718389508
+std_sd      <- 1.92403817890689
 
 ibema_transformed_tbl %>% 
-  plot_time_series(dat_movimento, preco_avg_trans)
+  plot_time_series(dat_movimento, vol_tot_trans)
 
 ibema_transformed_tbl %>% 
-  plot_acf_diagnostics(dat_movimento, preco_avg_trans)
+  plot_acf_diagnostics(dat_movimento, vol_tot_trans)
 
 plot_time_series_regression(
   .data = ibema_transformed_tbl %>% 
-    tk_augment_lags(.value = preco_avg_trans, .lags = c(1, 2, 3, 7, 14, 28)) %>% 
+    tk_augment_lags(.value = vol_tot_trans, .lags = c(7, 14, 21)) %>% 
     drop_na(),
   .date_var = dat_movimento,
-  .formula = preco_avg_trans ~ as.numeric(dat_movimento)
+  .formula = vol_tot_trans ~ as.numeric(dat_movimento)
   + wday(dat_movimento, label = TRUE)
   + month(dat_movimento, label = TRUE)
   + .
@@ -187,8 +191,8 @@ plot_time_series_regression(
 
 horizon    <- 14 # 14 dias
 lag_period <- 14
-rolling_periods <- c(7, 14)
-dot_value <- str_glue("preco_avg_trans_lag{lag_period}")
+rolling_periods <- c(7, 14, 21)
+dot_value <- str_glue("vol_tot_trans_lag{lag_period}")
 
 data_prepared_full_tbl <- ibema_transformed_tbl %>%
   
@@ -198,7 +202,7 @@ data_prepared_full_tbl <- ibema_transformed_tbl %>%
   ) %>%
   
   # Lags autocorrelacionados
-  tk_augment_lags(preco_avg_trans, .lags = lag_period) %>%
+  tk_augment_lags(vol_tot_trans, .lags = lag_period) %>%
   
   # Rolling features to stabilize trend from M5 Competition
   tk_augment_slidify(
@@ -223,10 +227,10 @@ data_prepared_full_tbl %>% tail(horizon + 1) # ok!
 # 2.0 PASSO 2 - SEPARAR os DADOS DE MODELAGEM E DE FORECAST ----
 
 data_prepared_tbl <- data_prepared_full_tbl %>%
-  filter(!is.na(preco_avg_trans))
+  filter(!is.na(vol_tot_trans))
 
 forecast_tbl <- data_prepared_full_tbl %>%
-  filter(is.na(preco_avg_trans))
+  filter(is.na(vol_tot_trans))
 
 # 3.0 TRAIN/TEST (DATASET DE MODELAGEM) ----
 
@@ -235,7 +239,7 @@ splits <- time_series_split(data_prepared_tbl, assess = horizon,
 
 splits %>%
   tk_time_series_cv_plan() %>%
-  plot_time_series_cv_plan(dat_movimento, preco_avg_trans)
+  plot_time_series_cv_plan(dat_movimento, vol_tot_trans)
 
 # 4.0 RECIPES ----
 # - Time Series Signature - Adds bulk time-based features
@@ -243,7 +247,7 @@ splits %>%
 # - Interactions, if any
 # - Fourier Features
 
-recipe_spec_base <- recipe(preco_avg_trans ~ ., data = training(splits)) %>%
+recipe_spec_base <- recipe(vol_tot_trans ~ ., data = training(splits)) %>%
   
   # Time Series Signature
   step_timeseries_signature(dat_movimento) %>%
@@ -257,7 +261,7 @@ recipe_spec_base <- recipe(preco_avg_trans ~ ., data = training(splits)) %>%
   step_dummy(all_nominal(), one_hot = TRUE) %>%
   
   # Fourier
-  step_fourier(dat_movimento, period = c(1, 14), K = 2)
+  step_fourier(dat_movimento, period = rolling_periods, K = 2)
 
 
 recipe_spec_base %>% prep() %>% juice() %>% glimpse()
@@ -323,7 +327,7 @@ calibrate_and_plot(workflow_fit_lm, workflow_fit_glm, workflow_fit_rf)
 model_fit_auto_arima <- arima_reg() %>%
   set_engine("auto_arima") %>%
   fit(
-    preco_avg_trans ~ dat_movimento 
+    vol_tot_trans ~ dat_movimento 
     + fourier_vec(dat_movimento, period = 7)
     + fourier_vec(dat_movimento, period = 14)
     + fourier_vec(dat_movimento, period = 21),
@@ -343,7 +347,7 @@ model_fit_prophet <- prophet_reg(
   # seasonality_daily  = TRUE
 ) %>%
   set_engine("prophet") %>%
-  fit(preco_avg_trans ~ dat_movimento, data = training(splits))
+  fit(vol_tot_trans ~ dat_movimento, data = training(splits))
 
 calibrate_and_plot(workflow_fit_lm, workflow_fit_glm, workflow_fit_rf,
                    model_fit_auto_arima, model_fit_prophet)
@@ -354,12 +358,12 @@ model_fit_prophet_xregs <- prophet_reg(
   # changepoint_num    = 25,
   # changepoint_range  = 0.8,
   # seasonality_yearly = FALSE,
-  seasonality_weekly = TRUE
+  # seasonality_weekly = TRUE,
   # seasonality_daily  = TRUE
 ) %>%
   set_engine("prophet") %>%
   fit(
-    preco_avg_trans ~ dat_movimento 
+    vol_tot_trans ~ dat_movimento 
     + fourier_vec(dat_movimento, period = 7)
     + fourier_vec(dat_movimento, period = 14)
     + fourier_vec(dat_movimento, period = 21),
@@ -372,10 +376,7 @@ calibrate_and_plot(workflow_fit_lm, workflow_fit_glm, workflow_fit_rf,
 
 # 11.0 CUBIST ----
 
-model_spec_cubist <- cubist_rules(
-  committees = 7,
-  neighbors = 14
-) %>% 
+model_spec_cubist <- cubist_rules() %>% 
   set_engine("Cubist")
 
 set.seed(123)
@@ -407,10 +408,10 @@ calibrate_and_plot(workflow_fit_lm, workflow_fit_glm, workflow_fit_rf,
 
 model_spec_nnetar <- nnetar_reg(
   # non_seasonal_ar = 1,
-  seasonal_ar     = 7,
-  hidden_units    = 10
-  # penalty         = 1,
-  # num_networks    = 30,
+  # seasonal_ar     = 3,
+  # hidden_units    = 10,
+  # penalty         = 10,
+  # num_networks    = 20,
   # epochs          = 50
 ) %>%
   set_engine("nnetar")
@@ -473,60 +474,11 @@ submodels_refit_tbl %>%
   ) %>%
   plot_modeltime_forecast()
 
-# 15.0 BEST MODEL ----
-
-best_model_fit <- model_fit_auto_arima
-
-calibration_tbl <- modeltime_table(best_model_fit) %>% 
-  modeltime_calibrate(new_data = testing(splits))
-
-print(modeltime_accuracy(calibration_tbl))
-
-calibration_tbl %>% 
-  modeltime_forecast(
-    new_data    = testing(splits),
-    actual_data = data_prepared_tbl
-  ) %>% 
-  # Invert Transformation
-  mutate(across(.value:.conf_hi, .fns = ~ standardize_inv_vec(
-    x    = .,
-    mean = std_mean,
-    sd   = std_sd
-  ))) %>%
-  mutate(across(.value:.conf_hi, .fns = exp
-  )) %>%
-  
-  plot_modeltime_forecast()
-
-refit_tbl <- calibration_tbl %>%
-  modeltime_refit(data_prepared_tbl)
-
-# Visualize Forecast
-refit_tbl %>%
-  
-  modeltime_forecast(
-    new_data    = forecast_tbl,
-    actual_data = data_prepared_tbl,
-    keep_data   = TRUE
-  ) %>%
-  
-  # Invert Transformation
-  mutate(across(.value:.conf_hi, .fns = ~ standardize_inv_vec(
-    x    = .,
-    mean = std_mean,
-    sd   = std_sd
-  ))) %>%
-  mutate(across(.value:.conf_hi, .fns = exp
-  )) %>%
-  
-  plot_modeltime_forecast()
-
-# 16.0 ENSEMBLE ----
+# 15.0 ENSEMBLE ----
 
 # * Make Ensemble ----
 ensemble_fit_mean <- submodels_tbl %>% 
-  filter(.model_desc %in% c("RANDOMFOREST", "CUBIST",
-                            "REGRESSION WITH ARIMA(1,1,1) ERRORS")) %>% 
+  filter(.model_desc %in% c("RANDOMFOREST", "XGBOOST", "PROPHET")) %>% 
   ensemble_average(type = "mean")
 
 # * Modeltime Table ----
@@ -538,8 +490,7 @@ ensemble_tbl <- modeltime_table(
 ensemble_tbl %>%
   combine_modeltime_tables(
     submodels_tbl %>% 
-      filter(.model_desc %in% c("RANDOMFOREST", "CUBIST",
-                                "REGRESSION WITH ARIMA(1,1,1) ERRORS"))
+      filter(.model_desc %in% c("RANDOMFOREST", "XGBOOST", "PROPHET"))
   ) %>%
   modeltime_accuracy(testing(splits)) %>% 
   table_modeltime_accuracy(
@@ -550,11 +501,24 @@ ensemble_tbl %>%
 
 # * Ensemble Test Forecast ----
 ensemble_tbl %>%
+  modeltime_calibrate(testing(splits)) %>% 
   modeltime_forecast(
     new_data    = testing(splits),
     actual_data = data_prepared_tbl,
     keep_data   = TRUE
   ) %>%
+  # Invert Transformation
+  mutate(across(.value:.conf_hi, .fns = ~ standardize_inv_vec(
+    x    = .,
+    mean = std_mean,
+    sd   = std_sd
+  ))) %>%
+  mutate(across(.value:.conf_hi, .fns = ~ log_interval_inv_vec(
+    x           = ., 
+    limit_lower = limit_lower, 
+    limit_upper = limit_upper, 
+    offset      = offset
+  ))) %>%
   plot_modeltime_forecast()
 
 # * Refit Ensemble ----
@@ -562,7 +526,7 @@ ensemble_refit_tbl <- ensemble_tbl %>%
   modeltime_calibrate(testing(splits)) %>% 
   modeltime_refit(data_prepared_tbl)
 
-# * Visualize Ensemble Forecast ----
+# * Visualize Ensemble Forecast
 ensemble_refit_tbl %>%
   
   modeltime_forecast(
@@ -577,7 +541,11 @@ ensemble_refit_tbl %>%
     mean = std_mean,
     sd   = std_sd
   ))) %>%
-  mutate(across(.value:.conf_hi, .fns = exp
-  )) %>%
+  mutate(across(.value:.conf_hi, .fns = ~ log_interval_inv_vec(
+    x           = ., 
+    limit_lower = limit_lower, 
+    limit_upper = limit_upper, 
+    offset      = offset
+  ))) %>%
   
   plot_modeltime_forecast()

@@ -23,7 +23,7 @@ library(modeltime)
 library(modeltime.ensemble)
 library(modeltime.resample)
 # Data Viz / Stats
-library(ggstatsplot)
+library(plotly)
 # library(collapsibleTree)
 
 # INGESTÃO DE DADOS & PIPELINE DE DATA PREP ----
@@ -584,3 +584,20 @@ ensemble_refit_tbl %>%
   )) %>%
   
   plot_modeltime_forecast()
+
+# Aside - Artifacts ----
+
+price_artifacts <- list(
+  data_prepared_tbl = data_prepared_tbl,
+  train_tbl  = training(splits),
+  test_tbl   = testing(splits),
+  fore_tbl   = forecast_tbl,
+  inv_params = list(
+    std_mean = std_mean,
+    std_sd   = std_sd
+  ),
+  submodels_tbl  = submodels_tbl,
+  best_model_fit = best_model_fit
+)
+
+write_rds(price_artifacts, "00_artifacts/price_artifacts.rds")
